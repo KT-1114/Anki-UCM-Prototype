@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
@@ -26,23 +27,29 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.ContextThemeWrapper // Add this import
 import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.createBitmap
+import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import com.kt.ankiucmprototype.Constants.ACTION_RUN_OCR
 import com.kt.ankiucmprototype.Constants.ACTION_START_CAPTURE
+import com.kt.ankiucmprototype.Constants.ACTION_START_SNIPPING
 import com.kt.ankiucmprototype.Constants.EXTRA_DATA
 import com.kt.ankiucmprototype.Constants.EXTRA_RESULT_CODE
+import java.io.File
+import java.io.FileOutputStream
 import kotlin.math.abs
+
 
 /**
  * Core Foreground Service that takes care of the floating UI, screen capture with MediaProjection,
@@ -60,6 +67,9 @@ class UcmOverlayService : AccessibilityService() {
     private var bubbleView: View? = null
     private lateinit var layoutParams: WindowManager.LayoutParams
     private var selectionOverlay: FrameLayout? = null
+    private var snippingOverlay: SnippingOverlayView? = null
+
+    private var isMenuExpanded = false
 
     private lateinit var mediaProjectionManager: MediaProjectionManager
     private var mediaProjection: MediaProjection? = null
@@ -102,7 +112,7 @@ class UcmOverlayService : AccessibilityService() {
     private fun startForegroundServiceWithNotification(isCapturing: Boolean) {
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.ucm_service_running))
-            .setContentText(if (isCapturing) getString(R.string.ucm_screen_capture_active) else getString(R.string.ucm_ready_to_capture))
+            .setContentText(if (isCapturing) getString(R.string.ucm_capture_running) else getString(R.string.ucm_ready_to_capture))
             .setSmallIcon(R.mipmap.ic_launcher)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
@@ -157,6 +167,11 @@ class UcmOverlayService : AccessibilityService() {
                     captureScreenAndRunOCR()
                 }
             }
+            ACTION_START_SNIPPING -> {
+                if (mediaProjection != null) {
+                    startSnippingTool()
+                }
+            }
             else -> {
                 // Start with specialUse if we don't have capture data yet
                 startForegroundServiceWithNotification(isCapturing = false)
@@ -174,7 +189,11 @@ class UcmOverlayService : AccessibilityService() {
 
     @SuppressLint("ClickableViewAccessibility", "InflateParams")
     private fun addBubbleView() {
-        val inflater = LayoutInflater.from(this)
+        // 1. Wrap the service context with a Material Components theme
+        val contextThemeWrapper = ContextThemeWrapper(this, com.google.android.material.R.style.Theme_MaterialComponents_Light_NoActionBar)
+
+        // 2. Use the themed inflater
+        val inflater = LayoutInflater.from(contextThemeWrapper)
         bubbleView = inflater.inflate(R.layout.bubble_layout, null)
 
         layoutParams = WindowManager.LayoutParams().apply {
@@ -188,9 +207,12 @@ class UcmOverlayService : AccessibilityService() {
             y = 100
         }
 
-        val bubbleIcon = bubbleView?.findViewById<ImageView>(R.id.bubble_icon)
+        val mainFab = bubbleView?.findViewById<FloatingActionButton>(R.id.main_fab)
+        val subButtonsContainer = bubbleView?.findViewById<LinearLayout>(R.id.sub_buttons_container)
+        val btnTextMode = bubbleView?.findViewById<FloatingActionButton>(R.id.btn_text_mode)
+        val btnImageMode = bubbleView?.findViewById<FloatingActionButton>(R.id.btn_image_mode)
 
-        bubbleIcon?.setOnTouchListener(object : View.OnTouchListener {
+        mainFab?.setOnTouchListener(object : View.OnTouchListener {
             private var initialX = 0
             private var initialY = 0
             private var initialTouchX = 0f
@@ -235,30 +257,98 @@ class UcmOverlayService : AccessibilityService() {
             }
         })
 
-        bubbleIcon?.setOnClickListener {
+        mainFab?.setOnClickListener {
+            isMenuExpanded = !isMenuExpanded
+            subButtonsContainer?.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
+            mainFab.setImageResource(if (isMenuExpanded) android.R.drawable.ic_menu_close_clear_cancel else android.R.drawable.ic_menu_add)
+        }
+
+        btnTextMode?.setOnClickListener {
+            toggleMenu()
             if (mediaProjection == null) {
-                Log.d(TAG, "MediaProjection not ready, launching setup")
-                val intent = Intent(this, CaptureSetupActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                startActivity(intent)
+                launchSetup()
             } else {
-                Log.d(TAG, "Bubble clicked - starting OCR")
                 captureScreenAndRunOCR()
+            }
+        }
+
+        btnImageMode?.setOnClickListener {
+            toggleMenu()
+            if (mediaProjection == null) {
+                launchSetup()
+            } else {
+                startSnippingTool()
             }
         }
 
         windowManager.addView(bubbleView, layoutParams)
     }
 
+    private fun toggleMenu() {
+        isMenuExpanded = false
+        bubbleView?.findViewById<LinearLayout>(R.id.sub_buttons_container)?.visibility = View.GONE
+        bubbleView?.findViewById<FloatingActionButton>(R.id.main_fab)?.setImageResource(android.R.drawable.ic_menu_add)
+    }
+
+    private fun launchSetup() {
+        Log.d(TAG, "MediaProjection not ready, launching setup")
+        val intent = Intent(this, CaptureSetupActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+    }
+
+    private fun startSnippingTool() {
+        Log.d(TAG, "Starting Snipping Tool")
+        
+        // Hide bubble while snipping
+        bubbleView?.visibility = View.GONE
+
+        snippingOverlay = SnippingOverlayView(this).apply {
+            onSelectionConfirmed = { rect ->
+                Log.d(TAG, "Selection confirmed: $rect")
+                captureRegion(rect)
+                removeSnippingOverlay()
+            }
+            // Add a way to cancel if needed, for now just removing it on confirm
+        }
+
+        val params = WindowManager.LayoutParams().apply {
+            type = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+            format = PixelFormat.TRANSLUCENT
+            flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_FULLSCREEN
+            width = WindowManager.LayoutParams.MATCH_PARENT
+            height = WindowManager.LayoutParams.MATCH_PARENT
+            gravity = Gravity.TOP or Gravity.START
+        }
+
+        windowManager.addView(snippingOverlay, params)
+    }
+
+    private fun removeSnippingOverlay() {
+        snippingOverlay?.let {
+            try {
+                windowManager.removeView(it)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error removing snipping overlay: ${e.message}")
+            }
+            snippingOverlay = null
+        }
+        bubbleView?.visibility = View.VISIBLE
+    }
+
+    private fun captureRegion(rect: Rect) {
+        // For now, we reuse the existing OCR pipeline but could be extended for Image + Text
+        // We'll pass the rect to the capture process
+        captureScreenAndRunOCR(rect)
+    }
+
     /**
      * Triggers the screen capture process and orchestrates OCR analysis.
-     *
-     * This method sets up the [VirtualDisplay] and [ImageReader] for managing buffers, takes care
-     * of screen metrics, and sets up a one-shot listener to grab the next frame from the screen
-     * buffer. The OCR engine then gets the frame so it can analyze the text in space.
      */
-    private fun captureScreenAndRunOCR() {
+    private fun captureScreenAndRunOCR(region: Rect? = null) {
         val projection = mediaProjection
         if (projection == null) {
             Log.e(TAG, "MediaProjection not initialized")
@@ -315,7 +405,7 @@ class UcmOverlayService : AccessibilityService() {
             if (image != null) {
                 Log.d(TAG, "Image acquired, processing...")
                 reader.setOnImageAvailableListener(null, null)
-                processCapturedImage(image, screenWidth, screenHeight)
+                processCapturedImage(image, screenWidth, screenHeight, region)
             } else {
                 Log.d(TAG, "Image acquired was null")
             }
@@ -326,11 +416,11 @@ class UcmOverlayService : AccessibilityService() {
         if (existingImage != null) {
             Log.d(TAG, "Found existing image in buffer, processing immediately")
             imageReader?.setOnImageAvailableListener(null, null)
-            processCapturedImage(existingImage, screenWidth, screenHeight)
+            processCapturedImage(existingImage, screenWidth, screenHeight, region)
         }
     }
 
-    private fun processCapturedImage(image: android.media.Image, screenWidth: Int, screenHeight: Int) {
+    private fun processCapturedImage(image: android.media.Image, screenWidth: Int, screenHeight: Int, region: Rect? = null) {
         val planes = image.planes
         val buffer = planes[0].buffer
         val pixelStride = planes[0].pixelStride
@@ -340,11 +430,41 @@ class UcmOverlayService : AccessibilityService() {
         val bitmap = createBitmap(screenWidth + rowPadding / pixelStride, screenHeight)
         bitmap.copyPixelsFromBuffer(buffer)
 
-        // Crop the bitmap to remove padding
-        val croppedBitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
+        // Full bitmap without row padding
+        val fullBitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
 
-        runOCR(croppedBitmap)
+        var snipDimensions = ""
+        // If a specific region was selected, save it to cache
+        region?.let {
+            try {
+                // Ensure rect is within bitmap bounds
+                val left = it.left.coerceIn(0, screenWidth - 1)
+                val top = it.top.coerceIn(0, screenHeight - 1)
+                val width = it.width().coerceIn(1, screenWidth - left)
+                val height = it.height().coerceIn(1, screenHeight - top)
+                
+                val snipBitmap = Bitmap.createBitmap(fullBitmap, left, top, width, height)
+                saveBitmapToCache(snipBitmap)
+                snipDimensions = "${width}x${height}"
+            } catch (e: Exception) {
+                Log.e(TAG, "Error cropping to region: ${e.message}")
+            }
+        }
+
+        runOCR(fullBitmap, region, snipDimensions)
         image.close()
+    }
+
+    private fun saveBitmapToCache(bitmap: Bitmap) {
+        val file = File(cacheDir, "ucm_snip_${System.currentTimeMillis()}.png")
+        try {
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            }
+            Log.d(TAG, "Saved snip to ${file.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save snip to cache", e)
+        }
     }
 
     private fun stopCapture() {
@@ -354,13 +474,27 @@ class UcmOverlayService : AccessibilityService() {
         imageReader = null
     }
 
-    private fun runOCR(bitmap: Bitmap) {
+    private fun runOCR(bitmap: Bitmap, snipRect: Rect? = null, snipDimensions: String = "") {
         val image = InputImage.fromBitmap(bitmap, 0)
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
         recognizer.process(image)
             .addOnSuccessListener { result ->
-                showSelectionOverlay(result.textBlocks)
+                val filteredBlocks = if (snipRect != null) {
+                    result.textBlocks.filter { block ->
+                        val blockRect = block.boundingBox
+                        // Ignore block if its boundingBox is INSIDE the snipRect
+                        blockRect == null || !snipRect.contains(blockRect)
+                    }
+                } else {
+                    result.textBlocks
+                }
+
+                if (snipRect != null) {
+                    Log.d(TAG, "Captured Image: $snipDimensions, Found ${filteredBlocks.size} text blocks outside snip")
+                }
+
+                showSelectionOverlay(filteredBlocks)
                 bubbleView?.visibility = View.VISIBLE
             }
             .addOnFailureListener { e ->
@@ -372,14 +506,9 @@ class UcmOverlayService : AccessibilityService() {
     /**
      * Renders a selection overlay with detected text regions.
      *
-     * Makes a space on top of the screen where you can choose highlights over text blocks that
-     * are found. This gives a visual map of the OCR results, which lets users interact with
-     * specific text elements that were found during the capture process.
-     *
-     * @param textBlocks The list of [Text.TextBlock] objects containing spatial data
-     *     and content identified by the OCR engine.
+     * @param textBlocks The list of [Text.TextBlock] objects
      */
-    private fun showSelectionOverlay(textBlocks: List<Text.TextBlock>) {
+    private fun showSelectionOverlay(textBlocks: List<Text.TextBlock>, region: Rect? = null) {
         // Remove existing overlay if any
         selectionOverlay?.let {
             try {
@@ -437,14 +566,17 @@ class UcmOverlayService : AccessibilityService() {
             }
         }
 
+        val offsetX = 0
+        val offsetY = 0
+
         for (block in textBlocks) {
             val rect = block.boundingBox ?: continue
             val textView = TextView(this).apply {
                 setBackgroundColor(ContextCompat.getColor(this@UcmOverlayService, R.color.text_highlight))
                 val lp = FrameLayout.LayoutParams(rect.width(), rect.height())
                 lp.gravity = Gravity.TOP or Gravity.START
-                lp.leftMargin = rect.left
-                lp.topMargin = rect.top
+                lp.leftMargin = rect.left + offsetX
+                lp.topMargin = rect.top + offsetY
                 layoutParams = lp
                 
                 setOnClickListener {
