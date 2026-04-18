@@ -2,5 +2,10 @@
     <string name="app_name">Anki UCM Prototype</string>
     <string name="accessibility_service_description">UCM Contextual Miner Service for screen traversal.</string>
     <string name="ucm_floating_bubble">UCM Floating Bubble</string>
+    <string name="ucm_service_name">UCM Service</string>
+    <string name="ucm_service_description">Monitoring for screen capture</string>
+    <string name="ucm_service_running">UCM is running</string>
+    <string name="ucm_screen_capture_active">Screen capture active</string>
+    <string name="ucm_ready_to_capture">Ready to capture</string>
     <string name="close_overlay">Close</string>
 </resources>

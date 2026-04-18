@@ -31,15 +31,27 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.annotation.RequiresApi
-import androidx.core.graphics.toColorInt
-import com.google.mlkit.vision.text.Text
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import androidx.core.graphics.createBitmap
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.kt.ankiucmprototype.Constants.ACTION_RUN_OCR
+import com.kt.ankiucmprototype.Constants.ACTION_START_CAPTURE
+import com.kt.ankiucmprototype.Constants.EXTRA_DATA
+import com.kt.ankiucmprototype.Constants.EXTRA_RESULT_CODE
 import kotlin.math.abs
-import androidx.core.graphics.createBitmap
 
+/**
+ * Core Foreground Service that takes care of the floating UI, screen capture with MediaProjection,
+ * and OCR processing.
+ *
+ * This service is in charge of the accessibility overlay, which makes it always available.
+ * A floating bubble for users to interact with and a background screen capture that runs in the
+ * background and a text recognition pipeline that uses ML Kit.
+ */
 @Suppress("DEPRECATION")
 @SuppressLint("AccessibilityPolicy")
 class UcmOverlayService : AccessibilityService() {
@@ -75,8 +87,8 @@ class UcmOverlayService : AccessibilityService() {
     }
 
     private fun createNotificationChannel() {
-        val name = "UCM Service"
-        val descriptionText = "Monitoring for screen capture"
+        val name = getString(R.string.ucm_service_name)
+        val descriptionText = getString(R.string.ucm_service_description)
         val importance = NotificationManager.IMPORTANCE_LOW
         val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
             description = descriptionText
@@ -89,8 +101,8 @@ class UcmOverlayService : AccessibilityService() {
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private fun startForegroundServiceWithNotification(isCapturing: Boolean) {
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("UCM is running")
-            .setContentText(if (isCapturing) "Screen capture active" else "Ready to capture")
+            .setContentTitle(getString(R.string.ucm_service_running))
+            .setContentText(if (isCapturing) getString(R.string.ucm_screen_capture_active) else getString(R.string.ucm_ready_to_capture))
             .setSmallIcon(R.mipmap.ic_launcher)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
@@ -107,9 +119,9 @@ class UcmOverlayService : AccessibilityService() {
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            "START_CAPTURE" -> {
-                resultCode = intent.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED)
-                projectionData = intent.getParcelableExtra("DATA", Intent::class.java)
+            ACTION_START_CAPTURE -> {
+                resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
+                projectionData = intent.getParcelableExtra(EXTRA_DATA, Intent::class.java)
 
                 if (resultCode == Activity.RESULT_OK && projectionData != null) {
                     // Clean up any existing projection before starting a new one
@@ -140,7 +152,7 @@ class UcmOverlayService : AccessibilityService() {
                     }
                 }
             }
-            "RUN_OCR" -> {
+            ACTION_RUN_OCR -> {
                 if (mediaProjection != null) {
                     captureScreenAndRunOCR()
                 }
@@ -239,6 +251,13 @@ class UcmOverlayService : AccessibilityService() {
         windowManager.addView(bubbleView, layoutParams)
     }
 
+    /**
+     * Triggers the screen capture process and orchestrates OCR analysis.
+     *
+     * This method sets up the [VirtualDisplay] and [ImageReader] for managing buffers, takes care
+     * of screen metrics, and sets up a one-shot listener to grab the next frame from the screen
+     * buffer. The OCR engine then gets the frame so it can analyze the text in space.
+     */
     private fun captureScreenAndRunOCR() {
         val projection = mediaProjection
         if (projection == null) {
@@ -350,6 +369,16 @@ class UcmOverlayService : AccessibilityService() {
             }
     }
 
+    /**
+     * Renders a selection overlay with detected text regions.
+     *
+     * Makes a space on top of the screen where you can choose highlights over text blocks that
+     * are found. This gives a visual map of the OCR results, which lets users interact with
+     * specific text elements that were found during the capture process.
+     *
+     * @param textBlocks The list of [Text.TextBlock] objects containing spatial data
+     *     and content identified by the OCR engine.
+     */
     private fun showSelectionOverlay(textBlocks: List<Text.TextBlock>) {
         // Remove existing overlay if any
         selectionOverlay?.let {
@@ -362,7 +391,7 @@ class UcmOverlayService : AccessibilityService() {
 
         val canvas = FrameLayout(this).apply {
             // Dim the background slightly
-            setBackgroundColor("#33000000".toColorInt())
+            setBackgroundColor(ContextCompat.getColor(this@UcmOverlayService, R.color.overlay_background))
             fitsSystemWindows = false
         }
         selectionOverlay = canvas
@@ -411,7 +440,7 @@ class UcmOverlayService : AccessibilityService() {
         for (block in textBlocks) {
             val rect = block.boundingBox ?: continue
             val textView = TextView(this).apply {
-                setBackgroundColor("#44FFFFFF".toColorInt())
+                setBackgroundColor(ContextCompat.getColor(this@UcmOverlayService, R.color.text_highlight))
                 val lp = FrameLayout.LayoutParams(rect.width(), rect.height())
                 lp.gravity = Gravity.TOP or Gravity.START
                 lp.leftMargin = rect.left

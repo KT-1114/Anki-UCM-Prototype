@@ -10,7 +10,18 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import com.kt.ankiucmprototype.Constants.ACTION_RUN_OCR
+import com.kt.ankiucmprototype.Constants.ACTION_START_CAPTURE
+import com.kt.ankiucmprototype.Constants.EXTRA_DATA
+import com.kt.ankiucmprototype.Constants.EXTRA_RESULT_CODE
 
+/**
+ * A transparent activity required to request system-level screen capture permissions.
+ *
+ * This activity acts as a bridge to obtain [MediaProjection] tokens from the user. Since the 
+ * MediaProjection API requires an activity context to launch the permission dialog, this 
+ * component handles the request and pipes the resulting token back to the [UcmOverlayService].
+ */
 class CaptureSetupActivity : ComponentActivity() {
 
     private val projectionLauncher = registerForActivityResult(
@@ -18,9 +29,9 @@ class CaptureSetupActivity : ComponentActivity() {
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
             val intent = Intent(this, UcmOverlayService::class.java).apply {
-                action = "START_CAPTURE"
-                putExtra("RESULT_CODE", result.resultCode)
-                putExtra("DATA", result.data)
+                action = ACTION_START_CAPTURE
+                putExtra(EXTRA_RESULT_CODE, result.resultCode)
+                putExtra(EXTRA_DATA, result.data)
             }
             startForegroundService(intent)
         }
@@ -33,7 +44,7 @@ class CaptureSetupActivity : ComponentActivity() {
         if (UcmOverlayService.isServiceRunning && UcmOverlayService.hasProjection) {
             Log.d("CaptureSetupActivity", "Service is already running with projection, triggering OCR")
             val intent = Intent(this, UcmOverlayService::class.java).apply {
-                action = "RUN_OCR"
+                action = ACTION_RUN_OCR
             }
             startService(intent)
             finish()
