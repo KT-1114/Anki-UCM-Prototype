@@ -26,9 +26,13 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
-import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.TextView
 import androidx.annotation.RequiresApi
+import androidx.core.graphics.toColorInt
+import com.google.mlkit.vision.text.Text
 import androidx.core.app.NotificationCompat
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -43,6 +47,7 @@ class UcmOverlayService : AccessibilityService() {
     private lateinit var windowManager: WindowManager
     private var bubbleView: View? = null
     private lateinit var layoutParams: WindowManager.LayoutParams
+    private var selectionOverlay: FrameLayout? = null
 
     private lateinit var mediaProjectionManager: MediaProjectionManager
     private var mediaProjection: MediaProjection? = null
@@ -57,10 +62,14 @@ class UcmOverlayService : AccessibilityService() {
         private const val TOUCH_SLOP = 10
         private const val NOTIFICATION_ID = 1234
         private const val CHANNEL_ID = "UCM_SERVICE_CHANNEL"
+
+        var isServiceRunning = false
+        var hasProjection = false
     }
 
     override fun onCreate() {
         super.onCreate()
+        isServiceRunning = true
         mediaProjectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         createNotificationChannel()
     }
@@ -97,40 +106,49 @@ class UcmOverlayService : AccessibilityService() {
 
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == "START_CAPTURE") {
-            resultCode = intent.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED)
-            projectionData =
-                intent.getParcelableExtra("DATA", Intent::class.java)
+        when (intent?.action) {
+            "START_CAPTURE" -> {
+                resultCode = intent.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED)
+                projectionData = intent.getParcelableExtra("DATA", Intent::class.java)
 
-            if (resultCode == Activity.RESULT_OK && projectionData != null) {
-                // Clean up any existing projection before starting a new one
-                stopCapture()
-                mediaProjection?.stop()
+                if (resultCode == Activity.RESULT_OK && projectionData != null) {
+                    // Clean up any existing projection before starting a new one
+                    stopCapture()
+                    mediaProjection?.stop()
 
-                // Now that we have the intent, we can safely start foreground with mediaProjection type
-                startForegroundServiceWithNotification(isCapturing = true)
-                val projection = mediaProjectionManager.getMediaProjection(resultCode, projectionData!!)
-                
-                if (projection != null) {
-                    // Register a callback as required by Android 14+ (API 34)
-                    projection.registerCallback(object : MediaProjection.Callback() {
-                        override fun onStop() {
-                            super.onStop()
-                            stopCapture()
-                            mediaProjection = null
-                            Log.d(TAG, "MediaProjection stopped")
-                        }
-                    }, Handler(Looper.getMainLooper()))
+                    // Now that we have the intent, we can safely start foreground with mediaProjection type
+                    startForegroundServiceWithNotification(isCapturing = true)
+                    val projection = mediaProjectionManager.getMediaProjection(resultCode, projectionData!!)
                     
-                    mediaProjection = projection
-                    Log.d(TAG, "MediaProjection created successfully")
-                } else {
-                    Log.e(TAG, "Failed to get MediaProjection")
+                    if (projection != null) {
+                        // Register a callback as required by Android 14+ (API 34)
+                        projection.registerCallback(object : MediaProjection.Callback() {
+                            override fun onStop() {
+                                super.onStop()
+                                stopCapture()
+                                mediaProjection = null
+                                hasProjection = false
+                                Log.d(TAG, "MediaProjection stopped")
+                            }
+                        }, Handler(Looper.getMainLooper()))
+                        
+                        mediaProjection = projection
+                        hasProjection = true
+                        Log.d(TAG, "MediaProjection created successfully")
+                    } else {
+                        Log.e(TAG, "Failed to get MediaProjection")
+                    }
                 }
             }
-        } else {
-            // Start with specialUse if we don't have capture data yet
-            startForegroundServiceWithNotification(isCapturing = false)
+            "RUN_OCR" -> {
+                if (mediaProjection != null) {
+                    captureScreenAndRunOCR()
+                }
+            }
+            else -> {
+                // Start with specialUse if we don't have capture data yet
+                startForegroundServiceWithNotification(isCapturing = false)
+            }
         }
         return START_NOT_STICKY
     }
@@ -228,6 +246,9 @@ class UcmOverlayService : AccessibilityService() {
             return
         }
 
+        // Hide bubble before capturing to prevent it from appearing in OCR
+        bubbleView?.visibility = View.GONE
+
         val metrics = DisplayMetrics()
         @Suppress("DEPRECATION")
         windowManager.defaultDisplay.getRealMetrics(metrics)
@@ -320,31 +341,101 @@ class UcmOverlayService : AccessibilityService() {
 
         recognizer.process(image)
             .addOnSuccessListener { result ->
-                for (block in result.textBlocks) {
-                    val blockText = block.text
-                    val blockFrame = block.boundingBox
-                    Log.d("UCM_OCR", "Block: $blockText, Bounds: $blockFrame")
-                }
+                showSelectionOverlay(result.textBlocks)
+                bubbleView?.visibility = View.VISIBLE
             }
             .addOnFailureListener { e ->
                 Log.e("UCM_OCR", "OCR Failed", e)
+                bubbleView?.visibility = View.VISIBLE
             }
     }
 
-    private fun traverseNode(node: AccessibilityNodeInfo?) {
-        if (node == null) return
-
-        val text = node.text?.toString()
-        if (!text.isNullOrBlank() && !node.isPassword) {
-            Log.d(TAG, "Meaningful String: $text")
+    private fun showSelectionOverlay(textBlocks: List<Text.TextBlock>) {
+        // Remove existing overlay if any
+        selectionOverlay?.let {
+            try {
+                windowManager.removeView(it)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error removing the existing overlay: ${e.message}")
+            }
         }
 
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i)
-            if (child != null) {
-                traverseNode(child)
-                child.recycle()
+        val canvas = FrameLayout(this).apply {
+            // Dim the background slightly
+            setBackgroundColor("#33000000".toColorInt())
+            fitsSystemWindows = false
+        }
+        selectionOverlay = canvas
+
+        // Add a Close button
+        val closeButton = Button(this).apply {
+            text = context.getString(R.string.close_overlay)
+            layoutParams = FrameLayout.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.END
+                topMargin = 100
+                rightMargin = 50
             }
+            setOnClickListener {
+                dismissOverlay()
+            }
+        }
+        canvas.addView(closeButton)
+
+        val params = WindowManager.LayoutParams().apply {
+            type = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+            format = PixelFormat.TRANSLUCENT
+            flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                    WindowManager.LayoutParams.FLAG_FULLSCREEN
+            
+            width = WindowManager.LayoutParams.MATCH_PARENT
+            height = WindowManager.LayoutParams.MATCH_PARENT
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                fitInsetsTypes = 0
+                isFitInsetsIgnoringVisibility = true
+            }
+        }
+
+        for (block in textBlocks) {
+            val rect = block.boundingBox ?: continue
+            val textView = TextView(this).apply {
+                setBackgroundColor("#44FFFFFF".toColorInt())
+                val lp = FrameLayout.LayoutParams(rect.width(), rect.height())
+                lp.gravity = Gravity.TOP or Gravity.START
+                lp.leftMargin = rect.left
+                lp.topMargin = rect.top
+                layoutParams = lp
+                
+                setOnClickListener {
+                    Log.d(TAG, "Selected text: ${block.text}")
+                }
+            }
+            canvas.addView(textView)
+        }
+
+        windowManager.addView(canvas, params)
+    }
+
+    private fun dismissOverlay() {
+        selectionOverlay?.let {
+            try {
+                windowManager.removeView(it)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error removing overlay: ${e.message}")
+            }
+            selectionOverlay = null
         }
     }
 
@@ -356,12 +447,21 @@ class UcmOverlayService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        isServiceRunning = false
+        hasProjection = false
         stopCapture()
         bubbleView?.let {
             try {
                 windowManager.removeView(it)
             } catch (e: Exception) {
-                Log.e(TAG, "Error removing view: ${e.message}")
+                Log.e(TAG, "Error removing the bubble view: ${e.message}")
+            }
+        }
+        selectionOverlay?.let {
+            try {
+                windowManager.removeView(it)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error removing the selection overlay: ${e.message}")
             }
         }
     }
