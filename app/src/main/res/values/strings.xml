@@ -1,6 +1,6 @@
 <resources>
     <string name="app_name">Anki UCM Prototype</string>
-    <string name="accessibility_service_description">UCM Contextual Miner Service for screen traversal.</string>
+    <string name="accessibility_service_description">The Accessibility Service is required to display a floating bubble over other apps and to capture screen content for text recognition (OCR). Without this, the app cannot help you mine context from your screen.</string>
     <string name="ucm_floating_bubble">UCM Floating Bubble</string>
     <string name="ucm_service_name">UCM Service</string>
     <string name="ucm_service_description">Monitoring for screen capture</string>
@@ -11,4 +11,7 @@
     <string name="ucm_menu_image">Image + Text Mode</string>
     <string name="ucm_capture_running">UCM Capture Running</string>
     <string name="close_overlay">Close</string>
+    <string name="accessibility_permission_title">Accessibility Service Required</string>
+    <string name="enable_accessibility_button">Enable Accessibility Service</string>
+    <string name="accessibility_enabled_status">Accessibility Service is Enabled</string>
 </resources>
