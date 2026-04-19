@@ -48,6 +48,9 @@ import com.kt.ankiucmprototype.Constants.EXTRA_DATA
 import com.kt.ankiucmprototype.Constants.EXTRA_RESULT_CODE
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.abs
 
 
@@ -94,6 +97,7 @@ class UcmOverlayService : AccessibilityService() {
         isServiceRunning = true
         mediaProjectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         createNotificationChannel()
+        cleanupCache()
     }
 
     private fun createNotificationChannel() {
@@ -456,14 +460,29 @@ class UcmOverlayService : AccessibilityService() {
     }
 
     private fun saveBitmapToCache(bitmap: Bitmap) {
-        val file = File(cacheDir, "ucm_snip_${System.currentTimeMillis()}.png")
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmssSSS", Locale.US).format(Date())
+        val file = File(cacheDir, "clip_$timestamp.png")
         try {
             FileOutputStream(file).use { out ->
                 bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
             }
             Log.d(TAG, "Saved snip to ${file.absolutePath}")
+            val cacheSize = cacheDir.listFiles()?.count { it.name.startsWith("clip_") } ?: 0
+            Log.d("UCM_STORAGE", "There are $cacheSize files in cache.")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save snip to cache", e)
+        }
+    }
+
+    // Clean up cache by deleting clips older than 10 minutes
+    private fun cleanupCache() {
+        val tenMinutesAgo = System.currentTimeMillis() - (10 * 60 * 1000)
+        cacheDir.listFiles()?.forEach { file ->
+            if (file.name.startsWith("clip_") && file.lastModified() < tenMinutesAgo) {
+                if (file.delete()) {
+                    Log.d(TAG, "Deleted old cache file: ${file.name}")
+                }
+            }
         }
     }
 
@@ -508,7 +527,7 @@ class UcmOverlayService : AccessibilityService() {
      *
      * @param textBlocks The list of [Text.TextBlock] objects
      */
-    private fun showSelectionOverlay(textBlocks: List<Text.TextBlock>, region: Rect? = null) {
+    private fun showSelectionOverlay(textBlocks: List<Text.TextBlock>) {
         // Remove existing overlay if any
         selectionOverlay?.let {
             try {
