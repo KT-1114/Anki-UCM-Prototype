@@ -50,6 +50,7 @@ dependencies {
     implementation(libs.play.services.mlkit.text.recognition)
     implementation(libs.androidx.compose.material3)
     implementation(libs.material)
+    implementation("com.github.ankidroid:Anki-Android:api-v1.1.0")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

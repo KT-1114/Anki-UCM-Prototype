@@ -1,4 +1,6 @@
 <resources>
     <color name="overlay_background">#33000000</color>
     <color name="text_highlight">#44FFFFFF</color>
+    <color name="text_selected">#884CAF50</color>
+    <color name="dim_background">#80000000</color>
 </resources>

@@ -27,11 +27,10 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
-import android.view.ContextThemeWrapper // Add this import
-import android.widget.Button
-import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.TextView
+import android.app.AlertDialog
+import android.view.ContextThemeWrapper
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.widget.*
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -73,6 +72,13 @@ class UcmOverlayService : AccessibilityService() {
     private var snippingOverlay: SnippingOverlayView? = null
 
     private var isMenuExpanded = false
+    private var isOverlayVisible = false
+
+    private lateinit var ankiHelper: AnkiDroidHelper
+    private val selectedFieldMappings = mutableMapOf<TextView, Pair<String, String>>()
+    private val capturedImages = mutableListOf<String>()
+    private var selectedDeckId: Long? = null
+    private var selectedModelId: Long? = null
 
     private lateinit var mediaProjectionManager: MediaProjectionManager
     private var mediaProjection: MediaProjection? = null
@@ -98,6 +104,7 @@ class UcmOverlayService : AccessibilityService() {
         mediaProjectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         createNotificationChannel()
         cleanupCache()
+        ankiHelper = AnkiDroidHelper(this)
     }
 
     private fun createNotificationChannel() {
@@ -212,9 +219,11 @@ class UcmOverlayService : AccessibilityService() {
         }
 
         val mainFab = bubbleView?.findViewById<FloatingActionButton>(R.id.main_fab)
-        val subButtonsContainer = bubbleView?.findViewById<LinearLayout>(R.id.sub_buttons_container)
         val btnTextMode = bubbleView?.findViewById<FloatingActionButton>(R.id.btn_text_mode)
         val btnImageMode = bubbleView?.findViewById<FloatingActionButton>(R.id.btn_image_mode)
+        val btnAddNote = bubbleView?.findViewById<FloatingActionButton>(R.id.btn_add_note)
+        val btnSettings = bubbleView?.findViewById<FloatingActionButton>(R.id.btn_settings)
+        val btnClear = bubbleView?.findViewById<FloatingActionButton>(R.id.btn_clear_fields)
 
         mainFab?.setOnTouchListener(object : View.OnTouchListener {
             private var initialX = 0
@@ -263,8 +272,8 @@ class UcmOverlayService : AccessibilityService() {
 
         mainFab?.setOnClickListener {
             isMenuExpanded = !isMenuExpanded
-            subButtonsContainer?.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
-            mainFab.setImageResource(if (isMenuExpanded) android.R.drawable.ic_menu_close_clear_cancel else android.R.drawable.ic_menu_add)
+            updateMenuButtonsVisibility()
+            mainFab.setImageResource(if (isMenuExpanded) android.R.drawable.ic_menu_close_clear_cancel else if (isOverlayVisible) android.R.drawable.ic_menu_more else android.R.drawable.ic_menu_add)
         }
 
         btnTextMode?.setOnClickListener {
@@ -285,13 +294,171 @@ class UcmOverlayService : AccessibilityService() {
             }
         }
 
+        btnAddNote?.setOnClickListener {
+            toggleMenu()
+            addNoteToAnki()
+        }
+
+        btnSettings?.setOnClickListener {
+            toggleMenu()
+            showAnkiSettingsDialog()
+        }
+
+        btnClear?.setOnClickListener {
+            toggleMenu()
+            clearSelections()
+            Toast.makeText(this, "Cleared selections", Toast.LENGTH_SHORT).show()
+        }
+
         windowManager.addView(bubbleView, layoutParams)
+    }
+
+    private fun updateMenuButtonsVisibility() {
+        val subButtonsContainer = bubbleView?.findViewById<LinearLayout>(R.id.sub_buttons_container)
+        val btnTextMode = bubbleView?.findViewById<FloatingActionButton>(R.id.btn_text_mode)
+        val btnImageMode = bubbleView?.findViewById<FloatingActionButton>(R.id.btn_image_mode)
+        val btnAddNote = bubbleView?.findViewById<FloatingActionButton>(R.id.btn_add_note)
+        val btnSettings = bubbleView?.findViewById<FloatingActionButton>(R.id.btn_settings)
+        val btnClear = bubbleView?.findViewById<FloatingActionButton>(R.id.btn_clear_fields)
+
+        subButtonsContainer?.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
+        
+        if (isOverlayVisible) {
+            btnTextMode?.visibility = View.GONE
+            btnImageMode?.visibility = View.GONE
+            btnAddNote?.visibility = View.VISIBLE
+            btnSettings?.visibility = View.VISIBLE
+            btnClear?.visibility = View.VISIBLE
+        } else {
+            btnTextMode?.visibility = View.VISIBLE
+            btnImageMode?.visibility = View.VISIBLE
+            btnAddNote?.visibility = View.GONE
+            btnSettings?.visibility = View.GONE
+            btnClear?.visibility = View.GONE
+        }
+    }
+
+    private fun showAnkiSettingsDialog() {
+        if (ankiHelper.shouldRequestPermission()) {
+            Toast.makeText(this, getString(R.string.anki_permission_denied), Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val contextThemeWrapper = ContextThemeWrapper(this, com.google.android.material.R.style.Theme_MaterialComponents_Light_Dialog_Alert)
+        val dialogView = LayoutInflater.from(contextThemeWrapper).inflate(R.layout.anki_settings_layout, null)
+        val deckSpinner = dialogView.findViewById<Spinner>(R.id.deck_spinner)
+        val modelSpinner = dialogView.findViewById<Spinner>(R.id.model_spinner)
+
+        val decks = ankiHelper.api.deckList
+        val models = ankiHelper.api.getModelList(0)
+
+        if (decks == null || models == null) {
+            Toast.makeText(this, "Could not fetch Anki data", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val deckNames = decks.values.toList()
+        val deckIds = decks.keys.toList()
+        val modelNames = models.values.toList()
+        val modelIds = models.keys.toList()
+
+        deckSpinner.adapter = ArrayAdapter(contextThemeWrapper, android.R.layout.simple_spinner_dropdown_item, deckNames)
+        modelSpinner.adapter = ArrayAdapter(contextThemeWrapper, android.R.layout.simple_spinner_dropdown_item, modelNames)
+
+        // Set selections if already set
+        selectedDeckId?.let { id -> deckIds.indexOf(id).takeIf { it != -1 }?.let { deckSpinner.setSelection(it) } }
+        selectedModelId?.let { id -> modelIds.indexOf(id).takeIf { it != -1 }?.let { modelSpinner.setSelection(it) } }
+
+        AlertDialog.Builder(contextThemeWrapper)
+            .setTitle(R.string.anki_settings)
+            .setView(dialogView)
+            .setPositiveButton(R.string.save) { _, _ ->
+                selectedDeckId = deckIds[deckSpinner.selectedItemPosition]
+                selectedModelId = modelIds[modelSpinner.selectedItemPosition]
+                clearSelections() // Reset fields when model changes
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .create().apply {
+                window?.setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
+                show()
+            }
+    }
+
+    private fun addNoteToAnki() {
+        val modelId = selectedModelId
+        val deckId = selectedDeckId
+
+        if (modelId == null || deckId == null) {
+            Toast.makeText(this, "Please select deck and note type in settings", Toast.LENGTH_SHORT).show()
+            showAnkiSettingsDialog()
+            return
+        }
+
+        // Aggregate mappings into fields
+        val aggregatedFields = mutableMapOf<String, String>()
+        for (mapping in selectedFieldMappings.values) {
+            val fieldName = mapping.first
+            val text = mapping.second
+            val current = aggregatedFields[fieldName] ?: ""
+            aggregatedFields[fieldName] = if (current.isEmpty()) text else "$current\n$text"
+        }
+
+        if (aggregatedFields.isEmpty() && capturedImages.isEmpty()) {
+            Toast.makeText(this, "No content selected. Capture text or images first.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val fieldList = ankiHelper.api.getFieldList(modelId) ?: return
+        val fields = Array(fieldList.size) { i -> aggregatedFields[fieldList[i]] ?: "" }
+
+        // If we have captured images, append them to the first empty field or a field named "Image"
+        if (capturedImages.isNotEmpty()) {
+            val imageHtml = capturedImages.joinToString(" ") { filename ->
+                val uri = android.net.Uri.fromFile(File(cacheDir, filename))
+                val remoteName = ankiHelper.addMedia(uri, filename, "image/png")
+                if (remoteName != null) {
+                    "<img src=\"$remoteName\">"
+                } else {
+                    ""
+                }
+            }
+            
+            if (imageHtml.isNotEmpty()) {
+                var targetFieldIndex = fieldList.indexOfFirst { it.contains("Image", ignoreCase = true) }
+                if (targetFieldIndex == -1) {
+                    targetFieldIndex = fields.indexOfFirst { it.isEmpty() }
+                }
+                if (targetFieldIndex != -1) {
+                    fields[targetFieldIndex] = (fields[targetFieldIndex] + "\n" + imageHtml).trim()
+                }
+            }
+        }
+
+        try {
+            val noteId = ankiHelper.api.addNote(modelId, deckId, fields, null)
+            if (noteId != null) {
+                Toast.makeText(this, getString(R.string.note_added), Toast.LENGTH_SHORT).show()
+                clearSelections()
+                dismissOverlay()
+            } else {
+                Toast.makeText(this, getString(R.string.error_adding_note), Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error adding note", e)
+            Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun clearSelections() {
+        selectedFieldMappings.clear()
+        capturedImages.clear()
     }
 
     private fun toggleMenu() {
         isMenuExpanded = false
-        bubbleView?.findViewById<LinearLayout>(R.id.sub_buttons_container)?.visibility = View.GONE
-        bubbleView?.findViewById<FloatingActionButton>(R.id.main_fab)?.setImageResource(android.R.drawable.ic_menu_add)
+        updateMenuButtonsVisibility()
+        val mainFab = bubbleView?.findViewById<FloatingActionButton>(R.id.main_fab)
+        mainFab?.setImageResource(if (isOverlayVisible) android.R.drawable.ic_menu_more else android.R.drawable.ic_menu_add)
     }
 
     private fun launchSetup() {
@@ -314,7 +481,6 @@ class UcmOverlayService : AccessibilityService() {
                 captureRegion(rect)
                 removeSnippingOverlay()
             }
-            // Add a way to cancel if needed, for now just removing it on confirm
         }
 
         val params = WindowManager.LayoutParams().apply {
@@ -514,6 +680,8 @@ class UcmOverlayService : AccessibilityService() {
                 }
 
                 showSelectionOverlay(filteredBlocks)
+                isOverlayVisible = true
+                bubbleView?.findViewById<FloatingActionButton>(R.id.main_fab)?.setImageResource(android.R.drawable.ic_menu_more)
                 bubbleView?.visibility = View.VISIBLE
             }
             .addOnFailureListener { e ->
@@ -522,12 +690,10 @@ class UcmOverlayService : AccessibilityService() {
             }
     }
 
-    /**
-     * Renders a selection overlay with detected text regions.
-     *
-     * @param textBlocks The list of [Text.TextBlock] objects
-     */
     private fun showSelectionOverlay(textBlocks: List<Text.TextBlock>) {
+        isOverlayVisible = true
+        updateMenuButtonsVisibility()
+
         // Remove existing overlay if any
         selectionOverlay?.let {
             try {
@@ -538,35 +704,27 @@ class UcmOverlayService : AccessibilityService() {
         }
 
         val canvas = FrameLayout(this).apply {
-            // Dim the background slightly
-            setBackgroundColor(ContextCompat.getColor(this@UcmOverlayService, R.color.overlay_background))
             fitsSystemWindows = false
         }
         selectionOverlay = canvas
 
-        // Add a Close button
-        val closeButton = Button(this).apply {
-            text = context.getString(R.string.close_overlay)
-            layoutParams = FrameLayout.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT
-            ).apply {
-                gravity = Gravity.TOP or Gravity.END
-                topMargin = 100
-                rightMargin = 50
-            }
+        // Background dim view that dismisses on click
+        val dimView = View(this).apply {
+            setBackgroundColor(ContextCompat.getColor(this@UcmOverlayService, R.color.dim_background))
+            isClickable = true
+            isFocusable = true
             setOnClickListener {
                 dismissOverlay()
             }
         }
-        canvas.addView(closeButton)
+        canvas.addView(dimView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
 
         val params = WindowManager.LayoutParams().apply {
             type = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
             format = PixelFormat.TRANSLUCENT
             flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
                     WindowManager.LayoutParams.FLAG_FULLSCREEN
             
@@ -591,24 +749,98 @@ class UcmOverlayService : AccessibilityService() {
         for (block in textBlocks) {
             val rect = block.boundingBox ?: continue
             val textView = TextView(this).apply {
+                isClickable = true
+                isFocusable = true
                 setBackgroundColor(ContextCompat.getColor(this@UcmOverlayService, R.color.text_highlight))
                 val lp = FrameLayout.LayoutParams(rect.width(), rect.height())
                 lp.gravity = Gravity.TOP or Gravity.START
                 lp.leftMargin = rect.left + offsetX
                 lp.topMargin = rect.top + offsetY
                 layoutParams = lp
-                
+
                 setOnClickListener {
-                    Log.d(TAG, "Selected text: ${block.text}")
+                    if (selectedFieldMappings.containsKey(this)) {
+                        selectedFieldMappings.remove(this)
+                        setBackgroundColor(ContextCompat.getColor(this@UcmOverlayService, R.color.text_highlight))
+                        text = ""
+                        updateSelectionIndicators()
+                        Toast.makeText(this@UcmOverlayService, "Selection discarded", Toast.LENGTH_SHORT).show()
+                    } else {
+                        showFieldSelectionDialog(block.text, this)
+                    }
                 }
             }
             canvas.addView(textView)
         }
 
         windowManager.addView(canvas, params)
+
+        // Force bubble to front
+        bubbleView?.let {
+            try {
+                windowManager.removeView(it)
+                windowManager.addView(it, layoutParams)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error re-adding bubble: ${e.message}")
+            }
+        }
+    }
+
+    private fun showFieldSelectionDialog(text: String, textView: TextView) {
+        val modelId = selectedModelId
+        if (modelId == null) {
+            Toast.makeText(this, "Please select note type first", Toast.LENGTH_SHORT).show()
+            showAnkiSettingsDialog()
+            return
+        }
+
+        val fields = ankiHelper.api.getFieldList(modelId)
+        if (fields == null) {
+            Toast.makeText(this, "Could not fetch fields for model", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val contextThemeWrapper = ContextThemeWrapper(this, com.google.android.material.R.style.Theme_MaterialComponents_Light_Dialog_Alert)
+        AlertDialog.Builder(contextThemeWrapper)
+            .setTitle(R.string.select_field)
+            .setItems(fields) { _, which ->
+                val fieldName = fields[which]
+                selectedFieldMappings[textView] = Pair(fieldName, text)
+                
+                textView.setBackgroundColor(ContextCompat.getColor(this, R.color.text_selected))
+                textView.setTextColor(android.graphics.Color.WHITE)
+                textView.gravity = Gravity.CENTER
+                textView.textSize = 10f
+                
+                updateSelectionIndicators()
+                Toast.makeText(this, "Added to $fieldName", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .create().apply {
+                window?.setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
+                show()
+            }
+    }
+
+    private fun updateSelectionIndicators() {
+        val counts = mutableMapOf<String, Int>()
+        for (mapping in selectedFieldMappings.values) {
+            val fieldName = mapping.first
+            counts[fieldName] = (counts[fieldName] ?: 0) + 1
+        }
+        for ((view, mapping) in selectedFieldMappings) {
+            val fieldName = mapping.first
+            view.text = counts[fieldName].toString()
+        }
     }
 
     private fun dismissOverlay() {
+        isOverlayVisible = false
+        isMenuExpanded = false
+        clearSelections()
+        updateMenuButtonsVisibility()
+        val mainFab = bubbleView?.findViewById<FloatingActionButton>(R.id.main_fab)
+        mainFab?.setImageResource(android.R.drawable.ic_menu_add)
         selectionOverlay?.let {
             try {
                 windowManager.removeView(it)

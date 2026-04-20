@@ -31,8 +31,11 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.kt.ankiucmprototype.ui.theme.AnkiUCMPrototypeTheme
 
 class MainActivity : ComponentActivity() {
+    private lateinit var ankiHelper: AnkiDroidHelper
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ankiHelper = AnkiDroidHelper(this)
         enableEdgeToEdge()
         setContent {
             AnkiUCMPrototypeTheme {
@@ -40,11 +43,15 @@ class MainActivity : ComponentActivity() {
                 var isAccessibilityEnabled by remember {
                     mutableStateOf(PermissionManager.isAccessibilityServiceEnabled(context, UcmOverlayService::class.java))
                 }
+                var hasAnkiPermission by remember {
+                    mutableStateOf(!ankiHelper.shouldRequestPermission())
+                }
 
                 val lifecycleOwner = LocalLifecycleOwner.current
                 LaunchedEffect(lifecycleOwner) {
                     lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
                         isAccessibilityEnabled = PermissionManager.isAccessibilityServiceEnabled(context, UcmOverlayService::class.java)
+                        hasAnkiPermission = !ankiHelper.shouldRequestPermission()
                     }
                 }
 
@@ -63,6 +70,20 @@ class MainActivity : ComponentActivity() {
                                 style = MaterialTheme.typography.headlineSmall,
                                 color = MaterialTheme.colorScheme.primary
                             )
+                            Spacer(modifier = Modifier.height(32.dp))
+                            if (!hasAnkiPermission) {
+                                Button(onClick = {
+                                    ankiHelper.requestPermission(this@MainActivity, 101)
+                                }) {
+                                    Text(text = "Grant AnkiDroid Permission")
+                                }
+                            } else {
+                                Text(
+                                    text = "AnkiDroid Permission Granted",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         } else {
                             Text(
                                 text = stringResource(R.string.accessibility_permission_title),
